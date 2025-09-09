@@ -1,0 +1,17 @@
+{
+  "pricing_engine": {
+    "vat": 0.21,
+    "amazon_fee_rate": 0.13,
+    "fee_surcharge_rate": 0.02,
+    "shipping": 4.0,
+    "undercut_step": 0.01,
+    "tiers": [
+      {"max_cost": 10.0,  "min_margin": 0.14},
+      {"max_cost": 30.0,  "min_margin": 0.12},
+      {"max_cost": 60.0,  "min_margin": 0.09},
+      {"max_cost": 100.0, "min_margin": 0.07},
+      {"max_cost": 999999, "min_margin": 0.05}
+    ]
+  },
+  "allowed_brands": ["Ajax", "Aqara", "Yale"]
+}

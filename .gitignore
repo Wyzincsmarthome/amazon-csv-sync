@@ -1,0 +1,19 @@
+﻿# Python
+.venv/
+__pycache__/
+*.pyc
+
+# App data
+data/
+uploads/
+logs/
+*.log
+sync_*.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Outros
+*.zip

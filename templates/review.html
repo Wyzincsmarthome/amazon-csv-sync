@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8"/>
+  <title>Dados processados</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial; margin: 24px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; }
+    .num { font-variant-numeric: tabular-nums; text-align: right; }
+  </style>
+</head>
+<body>
+  <h1>Dados processados</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>SKU</th><th>Marca</th><th>Título</th><th>EAN</th>
+        <th>Custo</th><th>Stock</th>
+        <th>Preview €</th><th>Floor €</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in products %}
+      <tr>
+        <td>{{ r.get('sku','') }}</td>
+        <td>{{ r.get('brand','') }}</td>
+        <td>{{ r.get('title','') }}</td>
+        <td>{{ r.get('ean','') }}</td>
+        <td class="num">{{ r.get('cost','') }}</td>
+        <td class="num">{{ r.get('stock','') }}</td>
+        <td class="num">{{ r.get('preview_price','') }}</td>
+        <td class="num">{{ r.get('floor_price','') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

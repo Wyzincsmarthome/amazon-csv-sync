@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8"/>
+  <title>Classificação de Produtos</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial; margin: 24px; }
+    h1 { margin-top: 0; }
+    .toolbar { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; align-items: center; margin: 12px 0 16px; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+    .badge { display:inline-block; padding:4px 8px; border-radius:12px; font-size:12px; }
+    .ok { background:#e8fff0; color:#0a7a2a; }
+    .warn { background:#fff7e6; color:#8a6100; }
+    .muted { color: #666; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; vertical-align: top; }
+    tr:hover { background: #fafafa; }
+    input[type=text], select { padding:6px 8px; width: 100%; max-width: 260px; }
+    button { padding: 6px 10px; cursor: pointer; }
+    .pill { padding:2px 8px; border-radius: 999px; font-size: 12px; }
+    .status-listed { background:#e7f1ff; color:#0b5ed7; }
+    .status-match  { background:#e8fff0; color:#0a7a2a; }
+    .status-amb    { background:#fff7e6; color:#8a6100; }
+    .status-miss   { background:#ffecec; color:#b00020; }
+    .small { font-size: 12px; }
+    .num { font-variant-numeric: tabular-nums; text-align: right; }
+    .hidden { display:none !important; }
+    .offers { font-size:12px; color:#333; background:#f5f7ff; padding:6px 8px; border-radius:8px; }
+  </style>
+</head>
+<body>
+  <h1>Classificação de Produtos</h1>
+
+  <div class="toolbar">
+    <div class="row">
+      <span>Modo:</span>
+      <span id="modeBadge" class="badge"></span>
+      <button id="toggleModeBtn">Alternar modo</button>
+    </div>
+
+    <div class="row">
+      <button id="refreshInvBtn">Atualizar meu inventário</button>
+      <button id="reclassBtn">Reclassificar</button>
+    </div>
+
+    <div class="row">
+      <span class="small muted">Visíveis: <strong id="visCount">0</strong> • Selecionados: <strong id="selCount">0</strong></span>
+      <button id="selectVisibleBtn">Selecionar visíveis</button>
+      <button id="clearSelBtn">Limpar seleção</button>
+      <button id="bulkApproveBtn" title="Aprova candidatos para itens catalog_ambiguous (prefere mesma marca)">Bulk aprovar candidatos</button>
+      <button id="syncBtn">Sincronizar selecionados</button>
+      <a id="lastSyncLink" class="small" href="/last_sync" target="_blank">Ver último sync</a>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="chkAll"/></th>
+        <th>SKU / Categoria</th>
+        <th>Marca</th>
+        <th>Título</th>
+        <th>EAN</th>
+        <th>Estado</th>
+        <th>ASIN</th>
+        <th>Preview €</th>
+        <th>Floor €</th>
+        <th>Comparador</th>
+        <th>Aprovar / Ação</th>
+      </tr>
+    </thead>
+    <tbody id="rows">
+      {% for r in rows %}
+      <tr data-sku="{{ r.sku|e }}" data-existence="{{ r.existence|e }}" data-brand="{{ r.brand|e }}">
+        <td><input class="chk" type="checkbox"></td>
+        <td>
+          <div><strong>{{ r.sku }}</strong></div>
+          <div class="small muted">{{ r.category }}</div>
+          {% if r.my_seller_sku %}<div class="small">meu SKU: <strong>{{ r.my_seller_sku }}</strong></div>{% endif %}
+        </td>
+        <td>{{ r.brand }}</td>
+        <td>{{ r.title }}</td>
+        <td>{{ r.ean }}</td>
+        <td>
+          {% if r.existence == 'listed' %}
+            <span class="pill status-listed">listed</span>
+          {% elif r.existence == 'catalog_match' %}
+            <span class="pill status-match">catalog_match</span>
+          {% elif r.existence == 'catalog_ambiguous' %}
+            <span class="pill status-amb">catalog_ambiguous</span>
+          {% else %}
+            <span class="pill status-miss">not_found</span>
+          {% endif %}
+          {% if r.match_score %}<div class="small muted">score: {{ r.match_score }}</div>{% endif %}
+          {% if r.action %}<div class="small muted">ação: {{ r.action }}</div>{% endif %}
+        </td>
+        <td class="asin-cell">
+          {% if r.existence == 'catalog_ambiguous' and r.asin_options_list %}
+            <select class="asin-select">
+              <option value="">— escolher ASIN —</option>
+              {% for o in r.asin_options_list %}
+                {% if o.asin %}
+                  <option value="{{ o.asin }}">{{ o.asin }} — {{ o.brand or '' }} — {{ o.title or '' }}</option>
+                {% endif %}
+              {% endfor %}
+            </select>
+          {% else %}
+            <input type="text" class="asin-input" value="{{ r.asin }}" placeholder="ASIN (ex.: B0CW3J3F71)">
+          {% endif %}
+        </td>
+        <td class="num">{{ r.preview_price }}</td>
+        <td class="num">{{ r.floor_price }}</td>
+        <td>
+          {% if r.asin %}
+            <button class="compareBtn" data-asin="{{ r.asin }}">Ver ofertas</button>
+            <div class="offers hidden"></div>
+          {% else %}
+            <span class="small muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if r.existence == 'catalog_ambiguous' %}
+            <button class="approveSelectBtn">Aprovar selecionado</button>
+          {% elif r.existence in ['catalog_match','not_found'] %}
+            <button class="approveBtn">Aprovar ASIN</button>
+          {% else %}
+            <span class="small muted">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <script>
+    const simulate = {{ 'true' if simulate else 'false' }};
+    const modeBadge = document.getElementById('modeBadge');
+    function renderMode() {
+      modeBadge.textContent = simulate ? 'Simulado' : 'Real';
+      modeBadge.className = 'badge ' + (simulate ? 'warn' : 'ok');
+    }
+    renderMode();
+
+    const rowsTbody = document.getElementById('rows');
+    const visCount = document.getElementById('visCount');
+    const selCount = document.getElementById('selCount');
+    function updateCounts() {
+      const visible = [...rowsTbody.querySelectorAll('tr')].filter(tr => !tr.classList.contains('hidden')).length;
+      const selected = rowsTbody.querySelectorAll('tr:not(.hidden) .chk:checked').length;
+      visCount.textContent = visible;
+      selCount.textContent = selected;
+    }
+    updateCounts();
+
+    document.getElementById('toggleModeBtn').onclick = async () => {
+      const r = await fetch('/toggle_simulate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({simulate: !simulate})});
+      const j = await r.json(); location.reload();
+    };
+
+    document.getElementById('refreshInvBtn').onclick = async () => {
+      const r = await fetch('/refresh_inventory', {method:'POST'});
+      const j = await r.json();
+      alert(j.success ? (j.message || 'OK') : ('Erro: ' + j.error));
+    };
+
+    document.getElementById('reclassBtn').onclick = async () => {
+      const r = await fetch('/classify_run', {method:'POST'});
+      const j = await r.json();
+      if (j.success) { alert(j.message); location.reload(); }
+      else { alert('Erro: ' + j.error); }
+    };
+
+    document.getElementById('chkAll').onchange = (e) => {
+      document.querySelectorAll('.chk').forEach(c => c.checked = e.target.checked);
+      updateCounts();
+    };
+    document.getElementById('selectVisibleBtn').onclick = () => {
+      rowsTbody.querySelectorAll('tr:not(.hidden) .chk').forEach(c => c.checked = true);
+      updateCounts();
+    };
+    document.getElementById('clearSelBtn').onclick = () => {
+      rowsTbody.querySelectorAll('.chk').forEach(c => c.checked = false);
+      updateCounts();
+    };
+    rowsTbody.querySelectorAll('.chk').forEach(c => c.addEventListener('change', updateCounts));
+
+    document.querySelectorAll('.approveBtn').forEach(btn => {
+      btn.addEventListener('click', async (ev) => {
+        const tr = ev.target.closest('tr');
+        const sku = tr.getAttribute('data-sku');
+        const asin = (tr.querySelector('.asin-input')?.value || "").trim();
+        if (!asin) { alert('Indica um ASIN válido.'); return; }
+        const r = await fetch('/approve_asin', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sku, asin })});
+        const j = await r.json();
+        if (j.success) { alert('ASIN aprovado.'); location.reload(); }
+        else { alert('Erro: ' + j.error); }
+      });
+    });
+
+    document.querySelectorAll('.approveSelectBtn').forEach(btn => {
+      btn.addEventListener('click', async (ev) => {
+        const tr = ev.target.closest('tr');
+        const sku = tr.getAttribute('data-sku');
+        const asin = (tr.querySelector('.asin-select')?.value || "").trim();
+        if (!asin) { alert('Escolhe um ASIN.'); return; }
+        const r = await fetch('/approve_asin', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sku, asin })});
+        const j = await r.json();
+        if (j.success) { alert('ASIN aprovado do dropdown.'); location.reload(); }
+        else { alert('Erro: ' + j.error); }
+      });
+    });
+
+    document.querySelectorAll('.compareBtn').forEach(btn => {
+      btn.addEventListener('click', async (ev) => {
+        const tr = ev.target.closest('tr');
+        const asin = ev.target.getAttribute('data-asin');
+        const floorCell = tr.querySelector('td:nth-child(9)');
+        const floor = parseFloat((floorCell?.innerText || '0').replace(',', '.')) || 0;
+        const box = tr.querySelector('.offers');
+        box.classList.remove('hidden');
+        box.textContent = 'A carregar ofertas...';
+        try {
+          const r = await fetch('/offers_min?asin=' + encodeURIComponent(asin));
+          const j = await r.json();
+          if (!j.success) { box.textContent = 'Erro: ' + j.error; return; }
+          const minp = j.min_price;
+          if (minp == null) { box.textContent = 'Sem ofertas ativas para comparar.'; return; }
+          const recommended = Math.max(floor, (Math.round((minp - 0.01) * 100) / 100));
+          box.innerHTML = `Mín. concorrência: <strong>${minp.toFixed(2)}€</strong> · Teu recomendado: <strong>${recommended.toFixed(2)}€</strong>`;
+        } catch(e) {
+          box.textContent = 'Erro a obter ofertas.';
+        }
+      });
+    });
+
+    document.getElementById('syncBtn').onclick = async () => {
+      const rows = [];
+      document.querySelectorAll('#rows tr').forEach(tr => {
+        const sel = tr.querySelector('.chk').checked;
+        if (!sel || tr.classList.contains('hidden')) return;
+        const sku  = tr.getAttribute('data-sku');
+        const ex   = tr.getAttribute('data-existence');
+        const asin = (tr.querySelector('.asin-input')?.value || tr.querySelector('.asin-select')?.value || "").trim();
+        rows.push({sku, existence: ex, asin});
+      });
+      if (!rows.length) { alert('Seleciona pelo menos um produto.'); return; }
+      const r = await fetch('/sync_from_classified', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ rows })});
+      const j = await r.json();
+      if (j.success) alert(j.message);
+      else alert('Erro: ' + j.error);
+    };
+  </script>
+</body>
+</html>
