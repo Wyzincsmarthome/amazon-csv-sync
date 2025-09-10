@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>Pré-visualização (Classified)</h2>
+  <p>Total linhas: {{ total }}</p>
+  <div>
+    <a role="button" href="{{ url_for('download', kind='processed') }}">Descarregar produtos_processados.csv</a>
+    <a role="button" href="{{ url_for('download', kind='result') }}">Descarregar sync_result.csv</a>
+  </div>
+  <form action="{{ url_for('sync_to_amazon') }}" method="post" style="margin-top:1rem">
+    <button type="submit" {% if DRY_RUN %}class="secondary"{% endif %}>
+      {% if DRY_RUN %}Simular Sync (DRY_RUN=true){% else %}Enviar para Amazon (DRY_RUN=false){% endif %}
+    </button>
+  </form>
+  <small>Para alterar DRY_RUN, muda a variável DRY_RUN no ambiente do Codespace.</small>
+</section>
+
+<section style="overflow:auto; max-height:70vh;">
+  <table>
+    <thead>
+      <tr>
+        <th>SKU</th><th>EAN</th><th>Stock</th>
+        <th>Cost</th><th>Floor</th><th>Preview</th><th>Selling</th>
+        <th>ASIN</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.sku }}</td>
+        <td>{{ r.ean }}</td>
+        <td>{{ r.stock }}</td>
+        <td>{{ r.cost_price }}</td>
+        <td>{{ r.floor_price }}</td>
+        <td>{{ r.preview_price }}</td>
+        <td>{{ r.selling_price }}</td>
+        <td>{{ r.asin }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
