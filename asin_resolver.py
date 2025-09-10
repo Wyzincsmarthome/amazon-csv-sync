@@ -39,12 +39,7 @@ def _log_diag(payload: dict) -> None:
     except Exception:
         pass
 
-
 class SpaSession:
-    """
-    Sessão mínima para chamadas à SP-API (Catalog Items e Listings).
-    Se simulate=True, devolve respostas vazias mas regista logs para diagnóstico.
-    """
     def __init__(self, simulate: bool | None = None):
         if simulate is None:
             simulate = os.getenv("SPAPI_SIMULATE", "true").lower() in ("1", "true", "yes", "on")
@@ -72,7 +67,7 @@ class SpaSession:
             "client_secret": self.client_secret,
         }
         r = requests.post(LWA_TOKEN_URL, data=data, timeout=30)
-        _log_diag({"ts": _ts(), "op": "lwa_token", "status": getattr(r, "status_code", None), "text": (getattr(r, "text", "") or "")[:300]})
+        _log_diag({"ts": _ts(), "op": "lwa_token", "status": r.status_code, "text": r.text[:300]})
         r.raise_for_status()
         j = r.json()
         self._token = j["access_token"]
@@ -100,13 +95,12 @@ class SpaSession:
             "ts": _ts(),
             "op": "spapi_call",
             "path": path,
-            "status": getattr(resp, "status_code", None),
+            "status": resp.status_code,
             "params": params,
-            "sample": (getattr(resp, "text", "") or "")[:400]
+            "sample": resp.text[:400]
         })
         return resp
 
-    # Catalog Items v2022-04-01
     def search_by_ean(self, ean: str):
         path = "/catalog/2022-04-01/items"
         params = {
@@ -128,16 +122,12 @@ class SpaSession:
             params["brandNames"] = brand
         return self._signed("GET", path, params=params)
 
-    # Listings Items v2021-08-01
     def get_listing(self, seller_id: str, sku: str):
         path = f"/listings/2021-08-01/items/{quote(seller_id)}/{quote(sku)}"
         return self._signed("GET", path)
 
-
 def _extract_model_tokens(name: str) -> list[str]:
-    # ex.: "AJAX DOORPROTECT PLUS WHITE" -> ["AJAX","DOORPROTECT","PLUS","WHITE"]
     return re.findall(r"[A-Z0-9]{2,}[-_A-Z0-9]*", (name or "").upper())[:6]
-
 
 def resolve_asin(
     sku: str,
@@ -147,53 +137,37 @@ def resolve_asin(
     seller_id: str | None = None,
     simulate: bool | None = None
 ) -> dict:
-    """
-    Devolve:
-      - status: listed | catalog_match | catalog_ambiguous | not_found
-      - asin: str|None
-      - score: float (0..1)
-      - candidates: lista breve para diagnóstico
-    Regras:
-      1) Se Listings devolver summaries com ASIN -> listed
-      2) Se Catalog por EAN devolver items -> catalog_match (score=1.0)
-      3) Caso contrário, pesquisa por keywords (com e sem brand) e pontua pelo título/marca
-    """
     sess = SpaSession(simulate=simulate)
 
-    # 1) Já listado? (só valida se houver ASIN em summaries)
     if seller_id and sku:
         r = sess.get_listing(seller_id, sku)
-        if hasattr(r, "status_code") and r.status_code == 200:
-            asin = None
+        if r.status_code == 200:
             try:
                 j = r.json() or {}
                 sums = (j.get("summaries") or []) if isinstance(j, dict) else []
                 if sums:
                     asin = sums[0].get("asin")
+                    if asin:
+                        return {"status": "listed", "asin": asin, "score": 1.0, "candidates": []}
             except Exception:
-                asin = None
-            if asin:
-                return {"status": "listed", "asin": asin, "score": 1.0, "candidates": []}
+                pass
 
-    # 2) Tenta EAN primeiro — se vier qualquer item, aceita imediatamente
     if ean:
         r = sess.search_by_ean(ean)
-        if hasattr(r, "status_code") and r.status_code == 200:
+        if r.status_code == 200:
             try:
                 j = r.json() or {}
+                items = j.get("items") or []
+                if items:
+                    best_asin = items[0].get("asin")
+                    return {"status": "catalog_match", "asin": best_asin, "score": 1.0, "candidates": []}
             except Exception:
-                j = {}
-            items = (j or {}).get("items") or []
-            if items:
-                best_asin = items[0].get("asin")
-                return {"status": "catalog_match", "asin": best_asin, "score": 1.0, "candidates": []}
+                pass
 
-    # 3) Fallback por keywords (com filtro de marca e depois sem)
     items = []
     keywords = (name or sku).strip()
-
     r = sess.search_by_keywords(keywords, brand=brand, with_brand_filter=True)
-    if hasattr(r, "status_code") and r.status_code == 200:
+    if r.status_code == 200:
         try:
             j = r.json() or {}
             items = j.get("items") or []
@@ -202,14 +176,13 @@ def resolve_asin(
 
     if not items:
         r = sess.search_by_keywords(keywords, brand=None, with_brand_filter=False)
-        if hasattr(r, "status_code") and r.status_code == 200:
+        if r.status_code == 200:
             try:
                 j = r.json() or {}
                 items = j.get("items") or []
             except Exception:
                 items = []
 
-    # 4) Pontuar candidatos
     tokens = _extract_model_tokens(name or sku)
 
     def _brand_score(b, ref):
@@ -224,7 +197,7 @@ def resolve_asin(
         sc = _brand_score(it_brand, brand)
 
         sim = _sim(title, f"{brand} {' '.join(tokens)}")
-        if   sim >= 0.90: sc += 0.15
+        if sim >= 0.90: sc += 0.15
         elif sim >= 0.80: sc += 0.10
 
         sc = round(min(sc, 1.0), 2)
