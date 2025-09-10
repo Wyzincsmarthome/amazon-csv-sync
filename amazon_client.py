@@ -1,198 +1,166 @@
 # amazon_client.py
-# -*- coding: utf-8 -*-
-import os, time, json, logging, requests, gzip, io
+# Cliente SP-API minimalista, compatível com os teus secrets e endpoints.
+# Opera com Listings Items API: PATCH (stock/preço) e PUT (criação).
+# Sem dependências externas além de requests.
+
+import os, time, json, base64, hashlib, hmac
+from datetime import datetime
+from urllib.parse import urljoin
+import requests
 from dotenv import load_dotenv
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-from botocore.credentials import Credentials
 
 load_dotenv()
-log = logging.getLogger(__name__)
 
-LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
-SP = os.getenv("SPAPI_ENDPOINT","https://sellingpartnerapi-eu.amazon.com")
-MARKETPLACE_ID = os.getenv("MARKETPLACE_ID","A1RKKUPIHCS9HS")
+# ---------- ENV / CONFIG ----------
+SELLER_ID        = os.getenv("SELLER_ID")
+MARKETPLACE_ID   = os.getenv("MARKETPLACE_ID")
+SPAPI_ENDPOINT   = os.getenv("SPAPI_ENDPOINT", "https://sellingpartnerapi-eu.amazon.com")
+LWA_CLIENT_ID    = os.getenv("LWA_CLIENT_ID")
+LWA_CLIENT_SECRET= os.getenv("LWA_CLIENT_SECRET")
+LWA_REFRESH_TOKEN= os.getenv("LWA_REFRESH_TOKEN")
+AWS_ACCESS_KEY   = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_KEY   = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION       = os.getenv("AWS_REGION", "eu-west-1")
 
-class AmazonClient:
-    def __init__(self, simulate=True):
-        self.simulate = simulate
-        self.client_id = os.getenv("LWA_CLIENT_ID")
-        self.client_secret = os.getenv("LWA_CLIENT_SECRET")
-        self.refresh_token = os.getenv("LWA_REFRESH_TOKEN")
-        self.aws_access = os.getenv("AWS_ACCESS_KEY_ID")
-        self.aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
-        self.region = os.getenv("AWS_REGION","eu-west-1")
-        self.token = None
-        self.token_exp = 0
+if not all([SELLER_ID, MARKETPLACE_ID, LWA_CLIENT_ID, LWA_CLIENT_SECRET, LWA_REFRESH_TOKEN, AWS_ACCESS_KEY, AWS_SECRET_KEY]):
+    raise RuntimeError("Faltam variáveis obrigatórias nos secrets/env.")
 
-    # --------------- auth ---------------
-    def _get_token(self):
-        if self.simulate:
-            return "SIMULATED"
-        if self.token and time.time() < self.token_exp:
-            return self.token
-        data = {
-            "grant_type":"refresh_token",
-            "refresh_token": self.refresh_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret
-        }
-        r = requests.post(LWA_TOKEN_URL, data=data, timeout=30)
-        r.raise_for_status()
-        j = r.json()
-        self.token = j["access_token"]
-        self.token_exp = time.time() + j.get("expires_in",3600) - 60
-        return self.token
+# ---------- LWA TOKEN ----------
+def get_lwa_access_token():
+    url = "https://api.amazon.com/auth/o2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": LWA_REFRESH_TOKEN,
+        "client_id": LWA_CLIENT_ID,
+        "client_secret": LWA_CLIENT_SECRET,
+    }
+    r = requests.post(url, data=data, timeout=30)
+    r.raise_for_status()
+    return r.json()["access_token"]
 
-    def _signed(self, method, path, params=None, body=b"", headers=None):
-        if self.simulate:
-            class R:
-                status_code = 200
-                text = "SIMULATED"
-                def json(self_inner): return {"simulated": True}
-            return R()
-        url = f"{SP}{path}"
-        headers = headers or {}
-        headers["x-amz-access-token"] = self._get_token()
-        req = AWSRequest(method=method, url=url, params=params or {}, data=body, headers=headers)
-        creds = Credentials(self.aws_access, self.aws_secret)
-        SigV4Auth(creds, "execute-api", self.region).add_auth(req)
-        prepped = req.prepare()
-        return requests.request(method, prepped.url, headers=dict(prepped.headers), params=params, data=body, timeout=60)
+# ---------- AWS SigV4 mínimo ----------
+def _sign(key, msg): return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+def _get_signature_key(key, date_stamp, regionName, serviceName):
+    kDate    = _sign(("AWS4" + key).encode("utf-8"), date_stamp)
+    kRegion  = _sign(kDate, regionName)
+    kService = _sign(kRegion, serviceName)
+    kSigning = _sign(kService, "aws4_request")
+    return kSigning
 
-    # --------------- feeds (submit + status + reports) ---------------
-    def _create_feed_document(self, content_type="text/tab-separated-values; charset=UTF-8"):
-        path = "/feeds/2021-06-30/documents"
-        headers = {"content-type":"application/json"}
-        body = json.dumps({"contentType": content_type})
-        r = self._signed("POST", path, headers=headers, body=body.encode("utf-8"))
-        r.raise_for_status()
-        return r.json()
+def _amz_datetime():
+    now = datetime.utcnow()
+    return now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
 
-    def _upload_document(self, doc_info, content: bytes):
-        upload_url = doc_info["url"]
-        h = {"Content-Type": doc_info.get("contentType","text/tab-separated-values; charset=UTF-8")}
-        r = requests.put(upload_url, data=content, headers=h, timeout=60)
-        r.raise_for_status()
+def _canonical_request(method, path, querystring, headers, payload_hash):
+    signed_headers = ";".join([h.lower() for h in headers.keys()])
+    canonical_headers = "".join([f"{h.lower()}:{headers[h].strip()}\n" for h in headers.keys()])
+    return "\n".join([
+        method,
+        path,
+        querystring or "",
+        canonical_headers,
+        signed_headers,
+        payload_hash
+    ])
 
-    def submit_tsv(self, feed_type: str, tsv_str: str) -> str:
-        if self.simulate:
-            log.info("SIMULATED submit_tsv %s (%d bytes)", feed_type, len(tsv_str))
-            return f"SIM-{int(time.time())}"
-        doc = self._create_feed_document()
-        self._upload_document(doc, tsv_str.encode("utf-8"))
-        path = "/feeds/2021-06-30/feeds"
-        headers = {"content-type":"application/json"}
-        body = {
-            "feedType": feed_type,
-            "marketplaceIds": [MARKETPLACE_ID],
-            "inputFeedDocumentId": doc["feedDocumentId"]
-        }
-        r = self._signed("POST", path, headers=headers, body=json.dumps(body).encode("utf-8"))
-        r.raise_for_status()
-        return r.json()["feedId"]
+def _string_to_sign(amz_date, date_stamp, region, service, canonical_request):
+    cr_hash = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    return "\n".join([
+        "AWS4-HMAC-SHA256",
+        amz_date,
+        f"{date_stamp}/{region}/{service}/aws4_request",
+        cr_hash
+    ])
 
-    def get_feed(self, feed_id: str):
-        if self.simulate:
-            return {"feedId": feed_id, "processingStatus": "DONE", "resultFeedDocumentId": None, "simulated": True}
-        path = f"/feeds/2021-06-30/feeds/{feed_id}"
-        r = self._signed("GET", path)
-        r.raise_for_status()
-        return r.json()
+def _authorization_header(access_key, signed_headers, signature, date_stamp, region, service):
+    credential = f"{access_key}/{date_stamp}/{region}/{service}/aws4_request"
+    return f"AWS4-HMAC-SHA256 Credential={credential}, SignedHeaders={signed_headers}, Signature={signature}"
 
-    def wait_feed(self, feed_id: str, timeout_sec=420, poll_every=10):
-        if self.simulate:
-            return {"feedId": feed_id, "processingStatus": "DONE", "resultFeedDocumentId": "SIM-DOC", "simulated": True}
-        t0 = time.time()
-        while True:
-            j = self.get_feed(feed_id)
-            st = j.get("processingStatus")
-            if st in ("DONE","CANCELLED","FATAL","ERROR"):
-                return j
-            if time.time()-t0 > timeout_sec:
-                return j
-            time.sleep(poll_every)
+def _signed_request(method, path, params=None, json_body=None, access_token=None):
+    service = "execute-api"
+    host = SPAPI_ENDPOINT.replace("https://", "").strip("/")
+    url  = urljoin(SPAPI_ENDPOINT + "/", path.lstrip("/"))
 
-    def get_feed_document(self, feed_document_id: str):
-        if self.simulate:
-            return {"url":"", "compressionAlgorithm":"GZIP", "simulated":True}
-        path = f"/feeds/2021-06-30/documents/{feed_document_id}"
-        r = self._signed("GET", path)
-        r.raise_for_status()
-        return r.json()
+    body = json.dumps(json_body or {}, separators=(",", ":"), ensure_ascii=False) if method in ("POST","PUT","PATCH") else ""
+    payload_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
 
-    def download_report_text(self, feed_document_id: str) -> str:
-        if self.simulate:
-            return "SIMULATED REPORT"
-        doc = self.get_feed_document(feed_document_id)
-        url = doc.get("url")
-        alg = (doc.get("compressionAlgorithm") or "").upper()
-        rr = requests.get(url, timeout=60)
-        rr.raise_for_status()
-        data = rr.content
-        if alg == "GZIP":
-            try:
-                data = gzip.decompress(data)
-            except Exception:
-                data = gzip.GzipFile(fileobj=io.BytesIO(rr.content)).read()
-        try:
-            return data.decode("utf-8", errors="ignore")
-        except Exception:
-            return data.decode("latin-1", errors="ignore")
+    amz_date, date_stamp = _amz_datetime()
+    headers = {
+        "host": host,
+        "x-amz-date": amz_date,
+        "x-amz-access-token": access_token or "",
+        "content-type": "application/json; charset=utf-8",
+        "accept": "application/json",
+    }
+    # querystring vazio (usamos params no requests só para URL)
+    canonical = _canonical_request(method, url.replace(SPAPI_ENDPOINT, "").split("?",1)[0], "", headers, payload_hash)
+    sts = _string_to_sign(amz_date, date_stamp, AWS_REGION, service, canonical)
+    signing_key = _get_signature_key(AWS_SECRET_KEY, date_stamp, AWS_REGION, service)
+    signature = hmac.new(signing_key, sts.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    def save_processing_report(self, feed_id: str, feed_type: str) -> str | None:
-        """Guarda o relatório txt e devolve o caminho do ficheiro, se existir."""
-        try:
-            j = self.get_feed(feed_id)
-            doc_id = j.get("resultFeedDocumentId")
-            if not doc_id:
-                return None
-            txt = self.download_report_text(doc_id)
-            os.makedirs("data/reports", exist_ok=True)
-            name = f"data/reports/feed_{feed_type.replace('POST_','').replace('_DATA','').lower()}_{feed_id}.txt"
-            with open(name, "w", encoding="utf-8") as f:
-                f.write(txt)
-            return name
-        except Exception as e:
-            log.warning("Falha a descarregar relatório do feed %s: %s", feed_id, e)
-            return None
+    signed_headers = ";".join([h.lower() for h in headers.keys()])
+    headers["Authorization"] = _authorization_header(AWS_ACCESS_KEY, signed_headers, signature, date_stamp, AWS_REGION, service)
 
-    # --------------- helpers TSV (headers compatíveis) ---------------
-    def feed_inventory_tsv(self, df):
-        """POST_INVENTORY_AVAILABILITY_DATA — usar 'fulfillment-channel' ajuda a compatibilidade MFN."""
-        lines = ["sku\tquantity\tfulfillment-channel"]
-        for _, r in df.iterrows():
-            qty = int(float(r.get("stock", 0) or 0))
-            lines.append(f"{r['sku']}\t{qty}\tDEFAULT")
-        return "\n".join(lines)
+    r = requests.request(method, url, params=params, data=body if body else None, headers=headers, timeout=60)
+    if r.status_code >= 400:
+        raise RuntimeError(f"SP-API {method} {path} falhou: {r.status_code} {r.text[:500]}")
+    return r.json() if r.text else {}
 
-    def feed_pricing_tsv(self, df):
-        """POST_PRODUCT_PRICING_DATA — incluir 'currency' melhora compatibilidade."""
-        lines = ["sku\tprice\tcurrency"]
-        for _, r in df.iterrows():
-            price = float(r.get("selling_price", r.get("price", 0)) or 0)
-            lines.append(f"{r['sku']}\t{price:.2f}\tEUR")
-        return "\n".join(lines)
+# ---------- Listings Items API ----------
+def patch_listings_item(sku: str, quantity: int, price_with_tax_eur: float):
+    """
+    Atualiza stock e preço (com IVA) via PATCH.
+    """
+    access_token = get_lwa_access_token()
+    path = f"/listings/2021-08-01/items/{SELLER_ID}/{sku}"
+    params = {"marketplaceIds": MARKETPLACE_ID}
+    body = {
+        "productType": "PRODUCT",
+        "patches": [
+            {
+                "op": "replace",
+                "path": "/attributes/fulfillmentAvailability",
+                "value": [{"fulfillmentChannelCode":"DEFAULT","quantity": int(quantity)}]
+            },
+            {
+                "op": "replace",
+                "path": "/attributes/purchasableOffer",
+                "value": [{
+                    "currency": "EUR",
+                    "ourPrice": [{
+                        "schedule": [{
+                            "valueWithTax": { "amount": f"{price_with_tax_eur:.2f}", "currency":"EUR" }
+                        }]
+                    }]
+                }]
+            }
+        ]
+    }
+    return _signed_request("PATCH", path, params=params, json_body=body, access_token=access_token)
 
-    # --------------- pricing concorrência (opcional) ---------------
-    def get_listing_offers(self, asin: str):
-        if self.simulate:
-            return []
-        path = f"/products/pricing/v0/listings/{asin}/offers"
-        params = {"MarketplaceId": MARKETPLACE_ID}
-        r = self._signed("GET", path, params=params)
-        if r.status_code != 200:
-            return []
-        try:
-            j = r.json()
-        except Exception:
-            return []
-        offers = []
-        for o in ((j.get("payload") or {}).get("Offers") or []):
-            lp = 0.0
-            try:
-                lp = float(((o.get("ListingPrice") or {}).get("Amount") or 0.0)) + float(((o.get("Shipping") or {}).get("Amount") or 0.0))
-            except Exception:
-                lp = 0.0
-            offers.append({"LandedPrice": lp})
-        return offers
+def put_listings_item(sku: str, product_type: str, attributes: dict, requirements: str = "LISTING"):
+    """
+    Cria/atualiza listagem completa para um SKU (quando ainda não tens SKU associado ao ASIN).
+    Necessita product_type válido e attributes segundo Product Type Definitions.
+    """
+    access_token = get_lwa_access_token()
+    path = f"/listings/2021-08-01/items/{SELLER_ID}/{sku}"
+    params = {"marketplaceIds": MARKETPLACE_ID}
+    body = {
+        "productType": product_type,
+        "requirements": requirements,
+        "attributes": attributes
+    }
+    return _signed_request("PUT", path, params=params, json_body=body, access_token=access_token)
+
+# ---------- Catalog Items (resolver ASIN por GTIN/EAN) ----------
+def catalog_search_by_gtin(gtin: str):
+    access_token = get_lwa_access_token()
+    path = "/catalog/2022-04-01/items"
+    params = {
+        "identifiers": gtin,
+        "identifiersType": "GTIN",
+        "marketplaceIds": MARKETPLACE_ID,
+        "includedData": "attributes,identifiers,summaries,relationships"
+    }
+    return _signed_request("GET", path, params=params, json_body=None, access_token=access_token)
