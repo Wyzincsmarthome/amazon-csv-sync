@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <title>Amazon CSV Sync</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+</head>
+<body>
+<main class="container">
+  <header>
+    <h1>Amazon CSV Sync</h1>
+    <p>DRY_RUN: <strong>{{ 'ON' if DRY_RUN else 'OFF' }}</strong> &middot; Upload máx: {{ MAX_MB }} MB</p>
+    <nav>
+      <a href="{{ url_for('index') }}">Início</a>
+      <a href="{{ url_for('classify') }}">Classified</a>
+    </nav>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul>
+        {% for cat, msg in messages %}
+          <li><mark>{{ cat|upper }}</mark> {{ msg }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+  </header>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>
