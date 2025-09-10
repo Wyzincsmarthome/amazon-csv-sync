@@ -11,7 +11,6 @@ class PricingInputs:
     cfg: Optional[Dict] = None
 
 def _cfg(pe: Dict, key: str, default):
-    # aceita chaves alternativas do teu config.json
     aliases = {
         "amazon_fee_rate": ["amazon_fee_rate", "referral_rate", "fee_rate"],
         "fee_surcharge_rate": ["fee_surcharge_rate", "referral_surcharge_rate", "fee_surcharge"],
@@ -49,15 +48,13 @@ def calc_floor_price(cost: float, cfg: Dict) -> float:
     ship = float(_cfg(pe, "shipping", 4.0))
     min_margin = float(_tier_margin(cost, cfg))
 
-    # alvo = custo + lucro_min + transporte (tudo sem IVA, antes das fees)
     target = cost * (1.0 + min_margin) + ship
-    # fees aplicam-se ao PVP sem IVA (com surcharge)
     fee_factor = (1.0 - fee_rate * (1.0 + fee_surcharge))
     if fee_factor <= 0: fee_factor = 0.0001
     price_ex_vat = target / fee_factor
     price_inc_vat = price_ex_vat * (1.0 + vat)
     p = _rounding(price_inc_vat, pe)
-    min_abs_floor = float(pe.get("min_abs_floor") or 0.0)  # opcional
+    min_abs_floor = float(pe.get("min_abs_floor") or 0.0)
     if p < min_abs_floor: p = min_abs_floor
     return round(p + 1e-9, 2)
 
