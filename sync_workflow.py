@@ -1,168 +1,163 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-import pandas as pd
-from typing import Dict, Tuple
+import sys
+import csv
+import argparse
+from typing import Dict, Any, List
+
 from dotenv import load_dotenv
 
-from csv_processor_visiotech import process_csv, load_cfg
+# módulos do projeto
+# csv_processor_visiotech: lê CSV do fornecedor, normaliza e devolve lista de dicts
+# pricing_engine: calcula preço final com base no config.json
+# amazon_client: envia PATCH/PUT para Listings Items API
+from csv_processor_visiotech import load_visiotech_csv
 from pricing_engine import calc_final_price
-from asin_resolver import resolve_asin
-from amazon_client_updated import patch_listings_item, put_listings_item
+from amazon_client import patch_listings_item, put_listings_item
 
+# ---------------------------------------------------------------------
 
-load_dotenv()
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Sync catálogo para Amazon a partir do CSV do fornecedor (Visiotech).")
+    p.add_argument("--csv-input", default=os.getenv("CSV_INPUT", "data/visiotech.csv"),
+                   help="Caminho para o CSV de entrada (default: data/visiotech.csv ou $CSV_INPUT)")
+    p.add_argument("--limit", type=int, default=int(os.getenv("LIMIT", "0")),
+                   help="Limitar o número de SKUs processados (0 = sem limite)")
+    return p.parse_args()
 
-# Caminho para o CSV de entrada e flag dry-run
-CSV_INPUT: str = os.getenv("CSV_INPUT", "data/visiotech.csv")
-DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes", "on")
+def ensure_parent_dir(path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
+def write_sync_result(rows: List[Dict[str, Any]], dest_path: str) -> None:
+    ensure_parent_dir(dest_path)
+    if not rows:
+        with open(dest_path, "w", newline="", encoding="utf-8") as f:
+            f.write("sku,ean,stock,final_price,asin,action,status,message\n")
+        return
+    fieldnames = ["sku", "ean", "stock", "final_price", "asin", "action", "status", "message"]
+    with open(dest_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fieldnames})
 
-def _attributes_minimos_for_creation(row: Dict) -> Tuple[str, Dict]:
+def resolve_asin(item: Dict[str, Any]) -> str:
     """
-    Gera um par (product_type, attributes) mínimo para criar uma listagem
-    quando ainda não existe ASIN associado. Utiliza heurísticas simples baseadas
-    na categoria do produto. Na fase seguinte, poderá ser integrada a API
-    ``productTypeDefinitions`` para obter schemas completos.
-
-    Args:
-        row: Dicionário representando uma linha do DataFrame, já contendo
-            ``final_price`` e ``stock``.
-
-    Returns:
-        Tuple contendo o ``product_type`` e um dicionário ``attributes`` com
-        campos mínimos para criação via PUT.
+    Estratégia simples: usar EAN/GTIN quando disponível.
+    Se já vier ASIN do processador, respeitar. Caso contrário "n/a".
+    A tua resolução detalhada pode estar noutro módulo; ajusta aqui se necessário.
     """
-    title = row.get("title", "")
-    brand = row.get("brand", "")
-    ean = row.get("ean", "") or ""
-    qty = int(row.get("stock", 0) or 0)
-    price = float(row.get("final_price", 0.0))
+    asin = (item.get("asin") or "").strip()
+    if asin:
+        return asin
+    # se o teu fluxo mapear EAN->ASIN noutro passo, invoca-o aqui
+    return "n/a"
 
-    # Heurística para determinar o tipo de produto
-    category = str(row.get("category", "")).lower()
-    if "camera" in category:
-        ptype = "camera"
-    elif "lock" in category:
-        ptype = "lock"
-    else:
-        ptype = "product"
+# ---------------------------------------------------------------------
 
-    attributes = {
-        "brand": brand,
-        "item_name": title,
-        "external_product_id": ean,
-        "external_product_id_type": "EAN",
-        "purchasable_offer": {
-            "currency": "EUR",
-            "our_price": [
-                {
-                    "schedule": [
-                        {
-                            "value_with_tax": {
-                                "amount": f"{price:.2f}",
-                                "currency": "EUR",
-                            }
-                        }
-                    ]
-                }
-            ],
-        },
-        "fulfillment_availability": [
-            {
-                "fulfillment_channel_code": "DEFAULT",
-                "quantity": qty,
-            }
-        ],
-    }
-    return ptype, attributes
+def main() -> int:
+    load_dotenv(override=True)
 
+    args = parse_args()
+    csv_input = args.csv_input
+    limit = args.limit if args.limit and args.limit > 0 else None
 
-def main() -> None:
-    print(f"Fonte CSV: {CSV_INPUT} | DRY_RUN={DRY_RUN}")
-    # Carregar configuração (config.json)
-    cfg = load_cfg()
-    # Processar CSV com a configuração
-    df = process_csv(CSV_INPUT, cfg).fillna("")
+    dry_run = (os.getenv("DRY_RUN", "true").lower() == "true")
+    marketplace_id = os.getenv("MARKETPLACE_ID")
+    seller_id = os.getenv("SELLER_ID")
 
-    out_rows = []
-    for _, r in df.iterrows():
-        sku = str(r.get("sku", "")).strip()
-        ean = str(r.get("ean", "")).strip()
-        stock = int(str(r.get("stock", 0)))
-        cost_val = r.get("cost", 0.0)
-        try:
-            cost = float(cost_val)
-        except Exception:
-            cost = 0.0
+    if not os.path.isfile(csv_input):
+        print(f"[ERRO] CSV não encontrado: {csv_input}", file=sys.stderr)
+        return 2
 
-        # Calcular preço final com IVA segundo a tua configuração
-        price_dict = calc_final_price(cost=cost, competitor_price=None, cfg=cfg)
-        final_price = float(price_dict.get("final_price", 0.0))
+    print(f"[INFO] DRY_RUN={dry_run} | CSV={csv_input} | LIMIT={limit or '-'}")
+    print(f"[INFO] MARKETPLACE_ID={marketplace_id} | SELLER_ID={seller_id}")
 
-        title = str(r.get("title", "")).strip()
-        brand = str(r.get("brand", "")).strip()
-        category = str(r.get("category", "")).strip()
+    # 1) Ler e normalizar CSV do fornecedor
+    items = load_visiotech_csv(csv_input)
+    if limit:
+        items = items[:limit]
+    print(f"[INFO] Linhas carregadas: {len(items)}")
 
-        # Construir dicionário para criação (inclui final_price)
-        row_dict = r.to_dict()
-        row_dict["final_price"] = final_price
+    # 2) Calcular preço final e preparar linhas de sync
+    results: List[Dict[str, Any]] = []
+    for item in items:
+        # calc preço final
+        pricing = calc_final_price(item)
+        final_price = pricing.get("final_price")
+        sku = (item.get("sku") or "").strip()
+        ean = (item.get("ean") or "").strip()
+        stock = int(item.get("stock") or 0)
 
-        # Resolver ASIN (pode devolver listed/catalog_match/catalog_ambiguous/not_found)
-        asin = ""
-        try:
-            res = resolve_asin(
-                sku=sku,
-                name=title,
-                brand=brand,
-                ean=ean or None,
-                seller_id=None,
-                simulate=None,
-            )
-            asin = str(res.get("asin", "") or "").strip()
-        except Exception as e:
-            print(f"[WARN] Falha a resolver ASIN para {sku}/{ean}: {e}")
+        asin = resolve_asin(item)
 
-        # Actualização ou criação
-        if asin:
-            if DRY_RUN:
-                print(
-                    f"[DRY] PATCH SKU={sku} ASIN={asin} stock={stock} price={final_price:.2f}"
-                )
-            else:
-                try:
-                    patch_listings_item(sku=sku, quantity=stock, price_with_tax_eur=final_price)
-                except Exception as exc:
-                    print(
-                        f"[ERROR] PATCH falhou para {sku} ASIN={asin}: {exc}"
-                    )
+        # decidir acção
+        if asin and asin != "n/a":
+            action = "PATCH"   # atualizar listagem existente
         else:
-            ptype, attrs = _attributes_minimos_for_creation(row_dict)
-            if DRY_RUN:
-                print(
-                    f"[DRY] PUT SKU={sku} ptype={ptype} EAN={ean} stock={stock} price={final_price:.2f}"
-                )
+            action = "PUT"     # criar listagem mínima
+
+        results.append({
+            "sku": sku,
+            "ean": ean,
+            "stock": stock,
+            "final_price": final_price,
+            "asin": asin,
+            "action": action,
+            "status": "pending",
+            "message": ""
+        })
+
+    # 3) Enviar (ou simular) para a Amazon
+    for r in results:
+        sku = r["sku"]
+        asin = r["asin"]
+        stock = r["stock"]
+        price = r["final_price"]
+
+        try:
+            if dry_run:
+                r["status"] = "DRY_RUN"
+                r["message"] = f"Simulação de {r['action']} sku={sku} asin={asin} price={price} stock={stock}"
             else:
-                try:
-                    put_listings_item(sku=sku, product_type=ptype, attributes=attrs)
-                except Exception as exc:
-                    print(
-                        f"[ERROR] PUT falhou para {sku} EAN={ean}: {exc}"
+                if r["action"] == "PATCH":
+                    resp = patch_listings_item(
+                        seller_id=seller_id,
+                        sku=sku,
+                        marketplace_id=marketplace_id,
+                        price=price,
+                        quantity=stock
                     )
+                else:
+                    resp = put_listings_item(
+                        seller_id=seller_id,
+                        sku=sku,
+                        marketplace_id=marketplace_id,
+                        price=price,
+                        quantity=stock,
+                        ean=r["ean"]
+                    )
+                r["status"] = "OK"
+                r["message"] = str(resp)[:500]
+        except Exception as e:
+            r["status"] = "ERROR"
+            r["message"] = str(e)[:500]
 
-        out_rows.append(
-            {
-                "sku": sku,
-                "ean": ean,
-                "stock": stock,
-                "final_price": final_price,
-                "asin": asin or "n/a",
-            }
-        )
+    # 4) Guardar relatório
+    out_csv = "data/sync_result.csv"
+    write_sync_result(results, out_csv)
+    print(f"[INFO] Resultado escrito em: {out_csv}")
 
-    # Guardar o resultado para referência
-    os.makedirs("data", exist_ok=True)
-    pd.DataFrame(out_rows).to_csv("data/sync_result.csv", index=False, encoding="utf-8")
-    print("OK -> data/sync_result.csv gerado")
+    # resumo
+    ok = sum(1 for r in results if r["status"] in ("OK", "DRY_RUN"))
+    err = sum(1 for r in results if r["status"] == "ERROR")
+    print(f"[INFO] Concluído. OK/DRY={ok} | ERROS={err}")
 
+    return 0 if err == 0 else 1
+
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
