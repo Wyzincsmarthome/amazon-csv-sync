@@ -3,23 +3,27 @@ name: Amazon CSV Sync
 on:
   workflow_dispatch:
     inputs:
-      csv_path:
-        description: 'Caminho do CSV no repo (ex: data/visiotech.csv)'
-        required: false
-        default: 'data/visiotech.csv'
-      dry_run:
-        description: 'Simulação (não envia para SP-API)'
+      csv_url:
+        description: "URL direto do CSV do fornecedor (Visiotech)"
         required: true
-        default: 'true'
-  schedule:
-    - cron: '0 4 * * *'   # diário às 04:00 Lisboa
+        type: string
+      dry_run:
+        description: "Simular envio (true) ou enviar para a Amazon (false)"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+env:
+  PYTHON_VERSION: "3.11"
+  CSV_PATH: "data/visiotech.csv"
+  # endpoint EU (ajusta se precisares de outro marketplace)
+  SPAPI_ENDPOINT: "https://sellingpartnerapi-eu.amazon.com"
 
 jobs:
-  sync:
+  prepare-and-test:
+    name: "Preparar e Testar (gera sync_result.csv)"
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,16 +31,37 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install deps
+      - name: Instalar dependências
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
 
-      - name: Run sync (Listings Items API)
+      - name: Criar pasta data/
+        run: mkdir -p data
+
+      - name: Descarregar CSV do fornecedor
+        run: |
+          curl -fL "${{ inputs.csv_url }}" -o "${{ env.CSV_PATH }}"
+          ls -lh "${{ env.CSV_PATH }}"
+
+      - name: Validar leitura (opcional, mostra 5 linhas)
+        run: |
+          python - <<'PY'
+          import csv, itertools, sys
+          p = "${{ env.CSV_PATH }}"
+          with open(p, newline='', encoding='utf-8', errors='replace') as f:
+              r = csv.reader(f)
+              header = next(r)
+              print("HEADER:", header)
+              for row in itertools.islice(r, 5):
+                  print(row)
+          PY
+
+      - name: Correr sync em DRY-RUN escolhido
         env:
-          # Secrets/Env já criados no repo
+          # Segredos SP-API/AWS
           SELLER_ID: ${{ secrets.SELLER_ID }}
           MARKETPLACE_ID: ${{ secrets.MARKETPLACE_ID }}
           LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
@@ -45,19 +70,68 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          SPAPI_ENDPOINT: ${{ secrets.SPAPI_ENDPOINT }}
-          SPAPI_SIMULATE: ${{ secrets.SPAPI_SIMULATE }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SPAPI_ENDPOINT: ${{ env.SPAPI_ENDPOINT }}
+          # Controlos do teu script
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          # Usa o nome do ficheiro que substituíste:
-          python sync_workflow.py --csv-input "${{ github.event.inputs.csv_path }}"
-          # Se guardaste como sync_workflow_updated.py, usa:
-          # python sync_workflow_updated.py --csv-input "${{ github.event.inputs.csv_path }}"
+          set -e
+          echo "DRY_RUN=${DRY_RUN}"
+          python sync_workflow.py --csv-input "${{ env.CSV_PATH }}"
 
-      - name: Publicar resultado
-        if: always()
+      - name: Arquivar resultados (artefactos)
         uses: actions/upload-artifact@v4
         with:
-          name: sync-result
-          path: data/sync_result.csv
+          name: sync-output
+          path: |
+            data/sync_result.csv
+            *.log
+            **/*.log
           if-no-files-found: warn
+
+  deploy:
+    name: "Enviar para Amazon (quando dry_run=false)"
+    needs: prepare-and-test
+    runs-on: ubuntu-latest
+    if: ${{ inputs.dry_run == 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
+
+      - name: Restaurar CSV do passo anterior
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-output
+          path: data_restore
+      - name: Mover CSV (fallback se precisares de reler)
+        run: |
+          mkdir -p data
+          # se quiseres reler o mesmo CSV, descomenta:
+          # mv data_restore/visiotech.csv data/visiotech.csv || true
+          ls -la data_restore || true
+
+      - name: Sync REAL (DRY_RUN=false)
+        env:
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+          MARKETPLACE_ID: ${{ secrets.MARKETPLACE_ID }}
+          LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          LWA_REFRESH_TOKEN: ${{ secrets.LWA_REFRESH_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          SPAPI_ENDPOINT: "https://sellingpartnerapi-eu.amazon.com"
+          DRY_RUN: "false"
+        run: |
+          set -e
+          python sync_workflow.py --csv-input "${{ env.CSV_PATH }}" || \
+          echo "Se o script não reusa o CSV local, volta a fornecer csv_url e corre tudo numa só vez."
