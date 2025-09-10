@@ -18,35 +18,12 @@ def _to_int(x):
     try: return int(float(str(x).strip().replace(",", ".")))
     except: return 0
 
-# ---------- Leitura robusta ----------
-def _safe_read_csv(path_csv: str) -> Tuple[pd.DataFrame, str]:
-    attempts = []
-    attempts.append(dict(sep=None, engine="python", encoding="utf-8-sig", on_bad_lines="error"))
-    attempts.append(dict(sep=None, engine="python", encoding="latin1",     on_bad_lines="error"))
-    for sep in [";", ",", "\t", "|"]:
-        attempts.append(dict(sep=sep, engine="python", encoding="utf-8-sig", on_bad_lines="error"))
-        attempts.append(dict(sep=sep, engine="python", encoding="latin1",     on_bad_lines="error"))
-    attempts.append(dict(sep=None, engine="python", encoding="utf-8-sig", on_bad_lines="skip"))
-    attempts.append(dict(sep=None, engine="python", encoding="latin1",     on_bad_lines="skip"))
-
-    errors = []
-    for opts in attempts:
-        try:
-            df = pd.read_csv(path_csv, dtype=str, **opts).fillna("")
-            return df, f"OK {opts}"
-        except Exception as e:
-            errors.append(f"{opts} -> {e}")
-    raise RuntimeError("Falha a ler CSV do fornecedor:\n" + "\n".join(errors))
-
-# ---------- Mapeamento de colunas ----------
 MAP_CANDIDATES = {
-    # no teu CSV não há sku -> vamos gerar fallback mais abaixo
     "sku":      ["sku","cod","codigo","code","reference","ref","ref_proveedor","supplier_ref"],
     "brand":    ["brand","marca","manufacturer","fabricante"],
     "ean":      ["ean","gtin","barcode","codigo_barras","cod_barras","upc"],
     "title":    ["title","titulo","name","nombre","descricao","descrição","description","descripcion"],
     "category": ["category","categoria","familia","familía","family","familia_producto","category_parent"],
-    # custo no teu CSV: "precio_neto_compra"
     "cost":     ["precio_neto_compra","precio_compra","precio_neto","net_cost","purchase_price",
                  "cost","custo","price_cost","preco_custo","precio_coste","precio","price","net_price","pvd","pneto","pcoste"],
     "stock":    ["stock","qty","quantity","cantidad","qtd","existencias","disponible","availability"]
@@ -66,7 +43,7 @@ def _slug(s: str) -> str:
 def _generate_sku(row: dict) -> str:
     ean = str(row.get("ean","")).strip()
     if ean:
-        return ean  # melhor fallback: usar o EAN como SKU
+        return ean
     brand = str(row.get("brand","")).strip()
     title = str(row.get("title","")).strip()
     base = "-".join([x for x in (_slug(brand), _slug(title)) if x])
@@ -83,47 +60,55 @@ def _map_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str,str]]:
         col = chosen.get(canon) or ""
         norm[canon] = df[col] if col else ""
 
-    # Fallbacks críticos
-    # SKU: se vazio, gerar a partir de EAN ou (brand+title)
     if "sku" not in norm.columns:
         norm["sku"] = ""
     if norm["sku"].eq("").all():
         norm["sku"] = norm.apply(lambda r: _generate_sku(r), axis=1)
 
-    # Custo: se não encontrou nenhuma coluna, cria 0.0; caso tenha valores vazios, força 0.0
     if "cost" not in norm.columns:
         norm["cost"] = 0.0
-    # Stock: idem
     if "stock" not in norm.columns:
         norm["stock"] = 0
 
-    # anexar restantes colunas originais (só por segurança/consulta)
     for c in df.columns:
         if c not in norm.columns:
             norm[c] = df[c]
 
     return norm.fillna(""), chosen
 
-# ---------- Processo principal ----------
+def _safe_read_csv(path_csv: str) -> Tuple[pd.DataFrame, str]:
+    attempts = []
+    attempts.append(dict(sep=None, engine="python", encoding="utf-8-sig", on_bad_lines="error"))
+    attempts.append(dict(sep=None, engine="python", encoding="latin1",     on_bad_lines="error"))
+    for sep in [";", ",", "\t", "|"]:
+        attempts.append(dict(sep=sep, engine="python", encoding="utf-8-sig", on_bad_lines="error"))
+        attempts.append(dict(sep=sep, engine="python", encoding="latin1",     on_bad_lines="error"))
+    attempts.append(dict(sep=None, engine="python", encoding="utf-8-sig", on_bad_lines="skip"))
+    attempts.append(dict(sep=None, engine="python", encoding="latin1",     on_bad_lines="skip"))
+
+    errors = []
+    for opts in attempts:
+        try:
+            df = pd.read_csv(path_csv, dtype=str, **opts).fillna("")
+            return df, f"OK {opts}"
+        except Exception as e:
+            errors.append(f"{opts} -> {e}")
+    raise RuntimeError("Falha a ler CSV do fornecedor:\n" + "\n".join(errors))
+
 def process_csv(path_csv: str, cfg: Dict) -> pd.DataFrame:
     os.makedirs("data", exist_ok=True)
 
-    # 1) ler
     df_raw, how = _safe_read_csv(path_csv)
-    # 2) mapear colunas
     df, chosen = _map_columns(df_raw)
 
-    # 3) normalizar tipos
     df["cost"]  = df["cost"].map(_to_float) if "cost" in df.columns else 0.0
     df["stock"] = df["stock"].map(_to_int)  if "stock" in df.columns else 0
 
-    # 4) filtro por marcas permitidas (case-insensitive)
     allowed_cfg = cfg.get("allowed_brands") or []
     if allowed_cfg:
         allowed = {str(b).strip().casefold() for b in allowed_cfg}
         df = df[df["brand"].astype(str).str.strip().str.casefold().isin(allowed)].copy()
 
-    # 5) calcular preços (floor e preview)
     previews, floors = [], []
     for _, r in df.iterrows():
         out = calc_final_price(cost=float(r.get("cost",0.0)),
@@ -136,7 +121,6 @@ def process_csv(path_csv: str, cfg: Dict) -> pd.DataFrame:
     df["selling_price"] = df["preview_price"]
     df["status"]        = "ativo"
 
-    # 6) logs de diagnóstico úteis
     try:
         with open("data/_last_csv_read_info.txt","w",encoding="utf-8") as f:
             f.write(how + "\n\n")
@@ -154,7 +138,6 @@ def process_csv(path_csv: str, cfg: Dict) -> pd.DataFrame:
     except Exception:
         pass
 
-    # 7) persistir
     out_path = "data/produtos_processados.csv"
     df.to_csv(out_path, index=False)
     return df
