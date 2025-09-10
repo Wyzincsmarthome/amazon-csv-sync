@@ -1,106 +1,97 @@
 # sync_workflow.py
-# -*- coding: utf-8 -*-
-import os, json, logging
+# Pipeline: lê CSV Visiotech -> calcula preço -> tenta ASIN por EAN -> PATCH (stock/preço)
+# Se não houver ASIN/SKU, faz PUT com productType+attributes mínimos (fase 1).
+# Mantém o uso de SELLER_ID, MARKETPLACE_ID e pricing_engine/config existentes.
+
+import os
 import pandas as pd
-from datetime import datetime
-from amazon_client import AmazonClient
-from csv_processor_visiotech import load_cfg
+from decimal import Decimal
+from dotenv import load_dotenv
 
-log = logging.getLogger(__name__)
+from csv_processor_visiotech import process_csv  # usa tua função de normalização atual
+from pricing_engine import calc_final_price      # usa tua regra existente (com IVA + frete se já aplicas)
+from asin_resolver import resolve_asin           # mantém tua lógica atual
+from amazon_client import patch_listings_item, put_listings_item
 
-def _load_processed():
-    p = "data/produtos_processados.csv"
-    if not os.path.exists(p):
-        raise FileNotFoundError("Falta data/produtos_processados.csv (faz upload/processamento primeiro).")
-    return pd.read_csv(p)
+load_dotenv()
 
-def _load_classified():
-    p = "data/produtos_classificados.csv"
-    if not os.path.exists(p):
-        raise FileNotFoundError("Falta data/produtos_classificados.csv (classifica primeiro).")
-    return pd.read_csv(p, dtype=str).fillna("")
+CSV_INPUT = os.getenv("CSV_INPUT", "data/visiotech.csv")
+DRY_RUN   = os.getenv("DRY_RUN", "true").lower() == "true"
 
-def plan_and_sync(selected_rows: list[dict], simulate: bool = True) -> dict:
-    df_proc = _load_processed()
-    df_cls  = _load_classified()
+def _attributes_minimos_for_creation(row: dict) -> tuple[str, dict]:
+    """
+    Fase 1: criação simples. Define productType generico e atributos essenciais.
+    Na fase 2 podemos puxar Product Type Definitions para preencher atributos completos por categoria.
+    """
+    # Usa heurística simples: se categoria contém 'Camera' -> 'camera', se 'Lock' -> 'lock', senão 'product'
+    title = row["title"]
+    brand = row["brand"]
+    ean   = row.get("ean") or ""
+    qty   = int(row.get("stock") or 0)
+    price = float(row["final_price"])
 
-    sel = pd.DataFrame(selected_rows)
-    sel["sku"] = sel["sku"].astype(str)
+    cat = (row.get("category") or "").lower()
+    if "camera" in cat: ptype = "camera"
+    elif "lock" in cat: ptype = "lock"
+    else: ptype = "product"
 
-    merged = sel.merge(df_proc, on="sku", how="left", suffixes=("","_p"))
-    merged = merged.merge(
-        df_cls[["sku","asin","existence"]].rename(columns={"asin":"asin_cls","existence":"existence_cls"}),
-        on="sku", how="left"
-    )
-    merged["asin"] = merged.apply(lambda r: r["asin"] if str(r.get("asin","")).strip() else str(r.get("asin_cls","")).strip(), axis=1)
-    merged["existence"] = merged.apply(lambda r: r["existence"] if str(r.get("existence","")).strip() else str(r.get("existence_cls","")).strip(), axis=1)
-
-    to_offer  = merged[(merged["existence"]=="catalog_match") & (merged["asin"].astype(str).str.len() > 0)]
-    to_update = merged[(merged["existence"].isin(["listed","catalog_match"]))]
-
-    offers_created = 0
-    prices_sent = 0
-    stock_sent  = 0
-
-    feeds_info = {}
-
-    cfg = load_cfg()
-    client = AmazonClient(simulate=simulate)
-
-    if simulate:
-        offers_created = int(len(to_offer))
-        prices_sent    = int(len(to_update))
-        stock_sent     = int(len(to_update))
-    else:
-        # 1) Offers (listings)
-        if len(to_offer):
-            offers_tsv = _build_offers_tsv(to_offer)
-            feed_id = client.submit_tsv("POST_FLAT_FILE_LISTINGS_DATA", offers_tsv)
-            st = client.wait_feed(feed_id)
-            report_file = client.save_processing_report(feed_id, "POST_FLAT_FILE_LISTINGS_DATA")
-            feeds_info["offers"] = {"feedId": feed_id, "status": st.get("processingStatus"), "report": report_file}
-            offers_created = len(to_offer)
-
-        # 2) Pricing
-        if len(to_update):
-            pr_tsv = client.feed_pricing_tsv(to_update.rename(columns={"selling_price":"price"}))
-            feed_id = client.submit_tsv("POST_PRODUCT_PRICING_DATA", pr_tsv)
-            st = client.wait_feed(feed_id)
-            report_file = client.save_processing_report(feed_id, "POST_PRODUCT_PRICING_DATA")
-            feeds_info["pricing"] = {"feedId": feed_id, "status": st.get("processingStatus"), "report": report_file}
-            prices_sent = len(to_update)
-
-        # 3) Inventory
-        if len(to_update):
-            inv_tsv = client.feed_inventory_tsv(to_update.rename(columns={"stock":"quantity"}))
-            feed_id = client.submit_tsv("POST_INVENTORY_AVAILABILITY_DATA", inv_tsv)
-            st = client.wait_feed(feed_id)
-            report_file = client.save_processing_report(feed_id, "POST_INVENTORY_AVAILABILITY_DATA")
-            feeds_info["inventory"] = {"feedId": feed_id, "status": st.get("processingStatus"), "report": report_file}
-            stock_sent = len(to_update)
-
-    summary = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "offers_created": int(offers_created),
-        "prices_sent": int(prices_sent),
-        "stock_sent": int(stock_sent),
-        "feeds": feeds_info
+    attributes = {
+        "brand": brand,
+        "item_name": title,
+        "external_product_id": ean,
+        "external_product_id_type": "EAN",
+        "purchasable_offer": {
+            "currency":"EUR",
+            "our_price":[{"schedule":[{"value_with_tax":{"amount": f"{price:.2f}", "currency":"EUR"}}]}]
+        },
+        "fulfillment_availability":[{"fulfillment_channel_code":"DEFAULT","quantity": qty}]
     }
-    os.makedirs("data", exist_ok=True)
-    with open(f"data/sync_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json","w",encoding="utf-8") as f:
-        json.dump({"status":"dry_run" if simulate else "success", "summary": summary}, f, ensure_ascii=False, indent=2)
-    return summary
+    return ptype, attributes
 
-def _build_offers_tsv(df: pd.DataFrame) -> str:
-    # Campos compatíveis para POST_FLAT_FILE_LISTINGS_DATA:
-    # sku, product-id (ASIN), product-id-type (1=ASIN), price, quantity, add-delete, condition-type
-    headers = ["sku","product-id","product-id-type","price","quantity","add-delete","condition-type"]
-    lines = ["\t".join(headers)]
+def main():
+    print(f"Fonte CSV: {CSV_INPUT}  | DRY_RUN={DRY_RUN}")
+    df = process_csv(CSV_INPUT)  # deve devolver colunas: sku, ean, brand, title, category, cost, stock...
+    df = df.fillna("")
+
+    out_rows = []
     for _, r in df.iterrows():
-        sku = str(r.get("sku","")).strip()
-        price = str(r.get("selling_price","")).strip() or str(r.get("price","")).strip() or "0.00"
-        qty = str(int(float(r.get("stock",0) or 0)))
-        asin = str(r.get("asin","")).strip()
-        row = [sku, asin, "1", price, qty, "a", "New"]
-        lines.append("\t".join(row))
-    return "\n".join(lines)
+        sku   = str(r["sku"]).strip()
+        ean   = str(r.get("ean","")).strip()
+        stock = int(str(r.get("stock","0")))
+        cost  = Decimal(str(r.get("cost","0")))
+        price = float(calc_final_price(cost))  # respeita a tua engine atual
+        title = (r.get("title") or "").strip()
+        brand = (r.get("brand") or "").strip()
+        category = (r.get("category") or "").strip()
+
+        # Enriquecer linha com final_price para criação PUT
+        row = {**r.to_dict(), "final_price": price}
+
+        asin = ""
+        if ean:
+            try:
+                asin = resolve_asin(ean=ean, name=title, brand=brand) or ""
+            except Exception as e:
+                print(f"[WARN] Falha a resolver ASIN para {sku}/{ean}: {e}")
+
+        if asin:
+            # Atualiza stock/preço via PATCH
+            if DRY_RUN:
+                print(f"[DRY] PATCH SKU={sku} ASIN={asin} stock={stock} price={price:.2f}")
+            else:
+                patch_listings_item(sku=sku, quantity=stock, price_with_tax_eur=price)
+        else:
+            # Cria listagem via PUT (Fase 1: atributos mínimos + heurística de productType)
+            ptype, attrs = _attributes_minimos_for_creation(row)
+            if DRY_RUN:
+                print(f"[DRY] PUT SKU={sku} ptype={ptype} EAN={ean} stock={stock} price={price:.2f}")
+            else:
+                put_listings_item(sku=sku, product_type=ptype, attributes=attrs)
+
+        out_rows.append({"sku":sku, "ean":ean, "stock":stock, "final_price":price, "asin":asin or "n/a"})
+
+    pd.DataFrame(out_rows).to_csv("data/sync_result.csv", index=False, encoding="utf-8")
+    print("OK -> data/sync_result.csv gerado")
+
+if __name__ == "__main__":
+    main()
