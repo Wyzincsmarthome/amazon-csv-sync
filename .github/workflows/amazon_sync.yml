@@ -1,0 +1,63 @@
+name: Amazon CSV Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_path:
+        description: 'Caminho do CSV no repo (ex: data/visiotech.csv)'
+        required: false
+        default: 'data/visiotech.csv'
+      dry_run:
+        description: 'Simulação (não envia para SP-API)'
+        required: true
+        default: 'true'
+  schedule:
+    - cron: '0 4 * * *'   # diário às 04:00 Lisboa
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run sync (Listings Items API)
+        env:
+          # Secrets/Env já criados no repo
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+          MARKETPLACE_ID: ${{ secrets.MARKETPLACE_ID }}
+          LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          LWA_REFRESH_TOKEN: ${{ secrets.LWA_REFRESH_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          SPAPI_ENDPOINT: ${{ secrets.SPAPI_ENDPOINT }}
+          SPAPI_SIMULATE: ${{ secrets.SPAPI_SIMULATE }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          # Usa o nome do ficheiro que substituíste:
+          python sync_workflow.py --csv-input "${{ github.event.inputs.csv_path }}"
+          # Se guardaste como sync_workflow_updated.py, usa:
+          # python sync_workflow_updated.py --csv-input "${{ github.event.inputs.csv_path }}"
+
+      - name: Publicar resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-result
+          path: data/sync_result.csv
+          if-no-files-found: warn
