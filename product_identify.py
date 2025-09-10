@@ -1,7 +1,10 @@
 # product_identify.py
 # -*- coding: utf-8 -*-
-import os, json, logging
+import os
+import json
+import logging
 import pandas as pd
+
 from asin_resolver import resolve_asin
 from pricing_engine import calc_final_price
 from csv_processor_visiotech import load_cfg
@@ -15,7 +18,7 @@ def _load_my_inventory() -> pd.DataFrame:
         if "asin" not in df.columns: df["asin"] = ""
         if "seller_sku" not in df.columns: df["seller_sku"] = ""
         return df
-    return pd.DataFrame(columns=["asin","seller_sku","price","quantity","condition","status"])
+    return pd.DataFrame(columns=["asin", "seller_sku", "price", "quantity", "condition", "status"])
 
 def _ensure_prices(df: pd.DataFrame) -> pd.DataFrame:
     need_preview = "preview_price" not in df.columns
@@ -24,15 +27,22 @@ def _ensure_prices(df: pd.DataFrame) -> pd.DataFrame:
         return df
     cfg = load_cfg()
     if "cost" not in df.columns: df["cost"] = 0.0
+
     def _f(x):
-        try: return float(str(x).replace(",", "."))
-        except: return 0.0
+        try:
+            return float(str(x).replace(",", "."))
+        except:
+            return 0.0
+
     previews, floors = [], []
     for c in df["cost"].map(_f):
         out = calc_final_price(cost=c, competitor_price=None, cfg=cfg)
-        previews.append(out["final_price"]); floors.append(out["floor_price"])
-    if need_preview: df["preview_price"] = previews
-    if need_floor:   df["floor_price"]   = floors
+        previews.append(out["final_price"])
+        floors.append(out["floor_price"])
+    if need_preview:
+        df["preview_price"] = previews
+    if need_floor:
+        df["floor_price"] = floors
     return df
 
 def classify_products(input_csv="data/produtos_processados.csv",
@@ -40,9 +50,12 @@ def classify_products(input_csv="data/produtos_processados.csv",
                       seller_id=None, simulate=True) -> pd.DataFrame:
     if not os.path.exists(input_csv):
         raise FileNotFoundError(f"Falta o ficheiro {input_csv}. Faça upload/processamento primeiro.")
+    
     df = pd.read_csv(input_csv, dtype=str).fillna("")
-    for c in ("sku","ean","brand","title","category"):
-        if c not in df.columns: df[c] = ""
+    for c in ("sku", "ean", "brand", "title", "category"):
+        if c not in df.columns:
+            df[c] = ""
+    
     df = _ensure_prices(df)
 
     inv = _load_my_inventory()
@@ -51,17 +64,18 @@ def classify_products(input_csv="data/produtos_processados.csv",
 
     out_rows = []
     for _, row in df.iterrows():
-        sku   = str(row.get("sku","")).strip()
-        ean   = str(row.get("ean","")).strip()
-        brand = str(row.get("brand","")).strip()
-        title = str(row.get("title","")).strip() or sku
+        sku   = str(row.get("sku", "")).strip()
+        ean   = str(row.get("ean", "")).strip()
+        brand = str(row.get("brand", "")).strip()
+        title = str(row.get("title", "")).strip() or sku
 
         res = resolve_asin(sku=sku, name=title, brand=brand, ean=ean or None,
                            seller_id=seller_id, simulate=simulate)
-        status = res.get("status","not_found")
-        asin   = str(res.get("asin","")).strip().upper()
-        score  = float(res.get("score",0.0))
-        cands  = res.get("candidates",[])
+        
+        status = res.get("status", "not_found")
+        asin   = str(res.get("asin", "")).strip().upper()
+        score  = float(res.get("score", 0.0))
+        cands  = res.get("candidates", [])
 
         my_sku_for_asin = ""
         if asin and asin in asins_meus:
@@ -81,7 +95,7 @@ def classify_products(input_csv="data/produtos_processados.csv",
         out.update({
             "existence": status,
             "asin": asin,
-            "match_score": round(score,2),
+            "match_score": round(score, 2),
             "action": action,
             "my_seller_sku": my_sku_for_asin,
             "asin_options": json.dumps(cands, ensure_ascii=False)
