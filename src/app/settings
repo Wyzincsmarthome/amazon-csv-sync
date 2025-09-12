@@ -4,10 +4,10 @@ import os
 from dataclasses import dataclass
 
 def _get_bool(name: str, default: bool = False) -> bool:
-    val = os.getenv(name)
-    if val is None:
+    v = os.getenv(name)
+    if v is None:
         return default
-    return val.strip().lower() in {"1", "true", "yes", "on"}
+    return v.strip().lower() in {"1", "true", "yes", "on"}
 
 @dataclass(frozen=True)
 class Settings:
@@ -20,30 +20,20 @@ class Settings:
     seller_id: str
     marketplace_id: str
     app_simulate: bool
-    # Pricing defaults (podes externalizar para JSON, mas manter aqui é mais seguro)
-    vat_rate: float = 0.23  # PT: 23%
+    vat_rate: float = 0.23           # PT
     amazon_fee_rate: float = 0.15
     shipping_cost: float = 7.0
     surcharge: float = 0.0
     undercut_eur: float = 0.01
 
 def load_settings() -> Settings:
-    # Em DEV local, permitir carregar .env (sem falhar se não existir)
-    try:
-        from dotenv import load_dotenv  # type: ignore
-        load_dotenv(override=False)
-    except Exception:
-        pass
-
-    missing = [k for k in [
+    required = [
         "AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AWS_REGION",
         "LWA_CLIENT_ID","LWA_CLIENT_SECRET","LWA_REFRESH_TOKEN",
-        "SPAPI_SELLER_ID","SPAPI_MARKETPLACE_ID"
-    ] if not os.getenv(k)]
-
+        "SPAPI_SELLER_ID","SPAPI_MARKETPLACE_ID",
+    ]
+    missing = [k for k in required if not os.getenv(k)]
     if missing:
-        # Em produção (Actions) isto deve vir dos Secrets.
-        # Em dev local, cria .env a partir de .env.example.
         raise RuntimeError(f"Variáveis em falta: {', '.join(missing)}")
 
     return Settings(
@@ -55,7 +45,7 @@ def load_settings() -> Settings:
         lwa_refresh_token=os.environ["LWA_REFRESH_TOKEN"],
         seller_id=os.environ["SPAPI_SELLER_ID"],
         marketplace_id=os.environ["SPAPI_MARKETPLACE_ID"],
-        app_simulate=_get_bool("APP_SIMULATE", default=True),
+        app_simulate=_get_bool("APP_SIMULATE", True),
     )
 
 SETTINGS = load_settings()
