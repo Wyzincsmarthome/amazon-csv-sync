@@ -17,3 +17,21 @@ sync_*.json
 
 # Outros
 *.zip
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+.mypy_cache/
+.pytest_cache/
+data/
+uploads/
+logs/
+tmp/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
