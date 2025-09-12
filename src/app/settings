@@ -43,7 +43,7 @@ def load_settings() -> Settings:
         lwa_client_id=os.environ["LWA_CLIENT_ID"],
         lwa_client_secret=os.environ["LWA_CLIENT_SECRET"],
         lwa_refresh_token=os.environ["LWA_REFRESH_TOKEN"],
-        seller_id=os.environ["SPAPI_SELLER_ID"],
+        seller_id=os.environ["SELLER_ID"],
         marketplace_id=os.environ["SPAPI_MARKETPLACE_ID"],
         app_simulate=_get_bool("APP_SIMULATE", True),
     )
