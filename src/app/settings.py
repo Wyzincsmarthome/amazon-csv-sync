@@ -1,4 +1,3 @@
-# src/app/settings.py
 from __future__ import annotations
 import os
 from dataclasses import dataclass
@@ -20,7 +19,8 @@ class Settings:
     seller_id: str
     marketplace_id: str
     app_simulate: bool
-    vat_rate: float = 0.23           # PT
+    # Pricing/negócio
+    vat_rate: float = 0.23            # PT: IVA 23%
     amazon_fee_rate: float = 0.15
     shipping_cost: float = 7.0
     surcharge: float = 0.0
@@ -28,9 +28,9 @@ class Settings:
 
 def load_settings() -> Settings:
     required = [
-        "AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AWS_REGION",
-        "LWA_CLIENT_ID","LWA_CLIENT_SECRET","LWA_REFRESH_TOKEN",
-        "SPAPI_SELLER_ID","SPAPI_MARKETPLACE_ID",
+        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION",
+        "LWA_CLIENT_ID", "LWA_CLIENT_SECRET", "LWA_REFRESH_TOKEN",
+        "SPAPI_SELLER_ID", "SPAPI_MARKETPLACE_ID",
     ]
     missing = [k for k in required if not os.getenv(k)]
     if missing:
@@ -43,7 +43,7 @@ def load_settings() -> Settings:
         lwa_client_id=os.environ["LWA_CLIENT_ID"],
         lwa_client_secret=os.environ["LWA_CLIENT_SECRET"],
         lwa_refresh_token=os.environ["LWA_REFRESH_TOKEN"],
-        seller_id=os.environ["SELLER_ID"],
+        seller_id=os.environ["SPAPI_SELLER_ID"],
         marketplace_id=os.environ["SPAPI_MARKETPLACE_ID"],
         app_simulate=_get_bool("APP_SIMULATE", True),
     )
